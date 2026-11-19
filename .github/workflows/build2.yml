@@ -1,0 +1,407 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Write project files
+        run: |
+          set -e
+          cat > settings.gradle <<'COLABEOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = 'ColabFloat'
+          include ':app'
+          COLABEOF
+          cat > build.gradle <<'COLABEOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          COLABEOF
+          cat > gradle.properties <<'COLABEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          COLABEOF
+          mkdir -p app
+          cat > app/build.gradle <<'COLABEOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.example.colabfloat'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.colabfloat'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          COLABEOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'COLABEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <application android:allowBackup="false" android:label="Colab Float"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".FloatingService" android:exported="false" />
+              </application>
+          </manifest>
+          COLABEOF
+          mkdir -p app/src/main/java/com/example/colabfloat
+          cat > app/src/main/java/com/example/colabfloat/MainActivity.java <<'COLABEOF'
+          package com.example.colabfloat;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+              private EditText urlBox;
+
+              @Override public void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(32, 48, 32, 32);
+
+                  TextView t = new TextView(this);
+                  t.setText("Colab Float\n\nStep 1, 2 एक बार करो। फिर Step 3 दबाओ: Colab छोटी floating window में स्क्रीन पर तैरता रहेगा।");
+                  t.setTextSize(16);
+                  root.addView(t);
+
+                  Button overlay = btn("1) Overlay permission दो");
+                  Button battery = btn("2) Battery: Unrestricted करो");
+                  urlBox = new EditText(this);
+                  urlBox.setText(getSharedPreferences("p", MODE_PRIVATE).getString("url", "https://colab.research.google.com/"));
+                  urlBox.setSingleLine(true);
+                  Button start = btn("3) Floating window चालू करो");
+                  Button stop = btn("बंद करो");
+                  root.addView(overlay); root.addView(battery); root.addView(urlBox); root.addView(start); root.addView(stop);
+                  setContentView(root);
+
+                  overlay.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:" + getPackageName()))));
+                  battery.setOnClickListener(v -> {
+                      try {
+                          startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                  Uri.parse("package:" + getPackageName())));
+                      } catch (Exception e) {
+                          startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                  Uri.parse("package:" + getPackageName())));
+                      }
+                  });
+                  start.setOnClickListener(v -> {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "पहले Step 1 करो", Toast.LENGTH_LONG).show();
+                          return;
+                      }
+                      if (Build.VERSION.SDK_INT >= 33 &&
+                              checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                      }
+                      String u = urlBox.getText().toString().trim();
+                      if (!u.startsWith("https://")) u = "https://colab.research.google.com/";
+                      getSharedPreferences("p", MODE_PRIVATE).edit().putString("url", u).apply();
+                      Intent i = new Intent(this, FloatingService.class).putExtra("url", u);
+                      startForegroundService(i);
+                      finish();
+                  });
+                  stop.setOnClickListener(v -> stopService(new Intent(this, FloatingService.class)));
+              }
+
+              private Button btn(String s) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setAllCaps(false);
+                  b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  return b;
+              }
+          }
+          COLABEOF
+          mkdir -p app/src/main/java/com/example/colabfloat
+          cat > app/src/main/java/com/example/colabfloat/FloatingService.java <<'COLABEOF'
+          package com.example.colabfloat;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.net.wifi.WifiManager;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.Message;
+          import android.os.PowerManager;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class FloatingService extends Service {
+              private static final String CH = "colab_float";
+              private static final int[][] SIZES = {{170, 120}, {240, 320}, {340, 480}};
+              private static final int BASE_FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+              private static final String UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                      + "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+              private WindowManager wm;
+              private LinearLayout root;
+              private FrameLayout holder;
+              private WebView web, popup;
+              private TextView kbBtn, handle;
+              private WindowManager.LayoutParams lp, hlp;
+              private boolean docked = false, dockRight = true;
+              private int savedX;
+              private PowerManager.WakeLock wake;
+              private WifiManager.WifiLock wifi;
+              private float d;
+              private int sizeIdx = 1;
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private final Runnable ticker = new Runnable() {
+                  @Override public void run() {
+                      if (web != null) { web.onResume(); web.resumeTimers(); }
+                      if (popup != null) { popup.onResume(); }
+                      h.postDelayed(this, 20000);
+                  }
+              };
+
+              @Override public void onCreate() {
+                  super.onCreate();
+                  d = getResources().getDisplayMetrics().density;
+                  NotificationChannel c = new NotificationChannel(CH, "Floating Colab", NotificationManager.IMPORTANCE_LOW);
+                  getSystemService(NotificationManager.class).createNotificationChannel(c);
+                  Intent stop = new Intent(this, FloatingService.class).setAction("STOP");
+                  PendingIntent ps = PendingIntent.getService(this, 1, stop,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  Notification n = new Notification.Builder(this, CH)
+                          .setContentTitle("Floating Colab चालू है")
+                          .setContentText("बंद करने के लिए यहाँ टैप करो")
+                          .setSmallIcon(android.R.drawable.stat_notify_sync)
+                          .setContentIntent(ps).setOngoing(true).build();
+                  startForeground(1, n);
+
+                  PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                  wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "colabfloat:wake");
+                  wake.acquire();
+                  try {
+                      WifiManager w = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                      wifi = w.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "colabfloat:wifi");
+                      wifi.acquire();
+                  } catch (Exception ignored) {}
+              }
+
+              @Override public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && "STOP".equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
+                  if (root == null) {
+                      String url = intent != null && intent.getStringExtra("url") != null
+                              ? intent.getStringExtra("url") : "https://colab.research.google.com/";
+                      buildOverlay(url);
+                      h.postDelayed(ticker, 20000);
+                  }
+                  return START_STICKY;
+              }
+
+              private int dp(int v) { return (int) (v * d); }
+              private int screenW() { return getResources().getDisplayMetrics().widthPixels; }
+
+              private TextView tv(String s) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextColor(Color.WHITE);
+                  t.setTextSize(16);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(8), dp(4), dp(8), dp(4));
+                  return t;
+              }
+
+              private void configure(WebView w) {
+                  WebSettings s = w.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setBuiltInZoomControls(true);
+                  s.setDisplayZoomControls(false);
+                  s.setSupportMultipleWindows(true);
+                  s.setJavaScriptCanOpenWindowsAutomatically(true);
+                  s.setUserAgentString(UA);
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(w, true);
+              }
+
+              // ---- keyboard / focus ----
+              private void setWindowFocusable(boolean on) {
+                  if (lp == null || root == null) return;
+                  if (on) lp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+                  else lp.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+                  wm.updateViewLayout(root, lp);
+                  if (kbBtn != null) kbBtn.setTextColor(on ? Color.GREEN : Color.WHITE);
+                  if (on) { if (popup != null) popup.requestFocus(); else if (web != null) web.requestFocus(); }
+              }
+
+              // ---- popup (Google login / Drive connect) ----
+              private void closePopup() {
+                  if (popup == null) return;
+                  holder.removeView(popup);
+                  popup.destroy();
+                  popup = null;
+                  setWindowFocusable(false);
+              }
+
+              private void openPopup(Message resultMsg) {
+                  if (popup != null) closePopup();
+                  if (docked) undock();
+                  if (lp.width < dp(260)) {
+                      lp.width = dp(300);
+                      lp.height = dp(420);
+                  }
+                  int sw = screenW();
+                  if (lp.x + lp.width > sw) lp.x = Math.max(0, sw - lp.width);
+                  wm.updateViewLayout(root, lp);
+
+                  WebView pw = new WebView(this);
+                  configure(pw);
+                  pw.setWebViewClient(new WebViewClient());
+                  pw.setWebChromeClient(new WebChromeClient() {
+                      @Override public void onCloseWindow(WebView w) { closePopup(); }
+                  });
+                  holder.addView(pw, new FrameLayout.LayoutParams(-1, -1));
+                  popup = pw;
+                  setWindowFocusable(true);
+                  WebView.WebViewTransport t = (WebView.WebViewTransport) resultMsg.obj;
+                  t.setWebView(pw);
+                  resultMsg.sendToTarget();
+              }
+
+              // ---- dock to screen edge ----
+              private void dock() {
+                  if (docked || root == null) return;
+                  int sw = screenW();
+                  dockRight = lp.x + lp.width / 2 > sw / 2;
+                  savedX = Math.max(0, Math.min(lp.x, sw - lp.width));
+                  lp.x = dockRight ? sw - dp(1) : -lp.width + dp(1);
+                  wm.updateViewLayout(root, lp);
+                  docked = true;
+                  showHandle();
+              }
+
+              private void undock() {
+                  if (!docked) return;
+                  docked = false;
+                  if (hlp != null) lp.y = hlp.y;
+                  lp.x = savedX;
+                  wm.updateViewLayout(root, lp);
+                  removeHandle();
+              }
+
+              private void removeHandle() {
+                  try { if (handle != null) wm.removeView(handle); } catch (Exception ignored) {}
+                  handle = null;
+              }
+
+              private void showHandle() {
+                  removeHandle();
+                  handle = tv(dockRight ? "◂" : "▸");
+                  handle.setTextSize(20);
+                  handle.setBackgroundColor(0xCC3C4043);
+                  hlp = new WindowManager.LayoutParams(dp(30), dp(80),
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, BASE_FLAGS, PixelFormat.TRANSLUCENT);
+                  hlp.gravity = Gravity.TOP | Gravity.START;
+                  hlp.x = dockRight ? screenW() - dp(30) : 0;
+                  hlp.y = Math.max(0, lp.y);
+                  handle.setOnTouchListener(new View.OnTouchListener() {
+                      float sx, sy; int oy; boolean moved;
+                      @Override public boolean onTouch(View v, MotionEvent e) {
+                          if (!docked) return true;
+                          switch (e.getAction()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  sx = e.getRawX(); sy = e.getRawY(); oy = hlp.y; moved = false;
+                                  return true;
+                              case MotionEvent.ACTION_MOVE: {
+                                  float dx = e.getRawX() - sx, dy = e.getRawY() - sy;
+                                  if (Math.abs(dx) > dp(24) && (dockRight ? dx < 0 : dx > 0)) { undock(); return true; }
+                                  if (Math.abs(dy) > dp(8)) {
+                                      moved = true;
+                                      hlp.y = Math.max(0, oy + (int) dy);
+                                      wm.updateViewLayout(handle, hlp);
+                                  }
+                                  return true;
+                              }
+                              case MotionEvent.ACTION_UP:
+                                  if (!moved) undock();
+                                  return true;
+                          }
+                          return true;
+                      }
+                  });
+                  wm.addView(handle, hlp);
+              }
+
+              // ---- main overlay ----
+              private void buildOverlay(String url) {
+                  wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                  lp = new WindowManager.LayoutParams(dp(SIZES[sizeIdx][0]), dp(SIZES[sizeIdx][1]),
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, BASE_FLAGS, PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.START;
+                  lp.x = dp(8); lp.y = dp(80);
+
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(0xFF202124);
+
+                  LinearLayout bar = new LinearLayout(this);
+                  bar.setOrientation(LinearLayout.HORIZONTAL);
+                  bar.setBackgroundColor(0xFF3C4043);
+                  TextView title = tv("☰ Colab");
+                  title.setTextSize(13);
+                  title.setGravity(Gravity.CENTER_VERTICAL);
+                  title.setSingleLine(true);
+          
